@@ -1,0 +1,190 @@
+transaction script 'User-Defined Functions'
+{
+    global redeclare double calLine2Dlength(BSplineCurve line3D, CoordinateSystem baseCS)
+    {
+        // 求得路线的平面投影长度
+        
+        Point line2DPoint = new Point();
+        line2DPoint.ProjectOntoPlane(baseCS.XYPlane, line3D.Poles);
+        BSplineCurve line2D = new BSplineCurve();
+        line2D.ByPoles(line2DPoint);
+        return line2D.Length;
+    };
+    
+    global redeclare Solid createBoxGirderSolid(BSplineCurve centerLine, BSplineCurve sweepLine, double centerLineLength,
+                                                replicatable double startPos, replicatable double endPos, replicatable string startCelName, replicatable string endCelName,
+                                                replicatable int startSecIndex, replicatable int endSecIndex, replicatable int funcFlag)
+    {
+        // 建立混凝土箱梁节段
+        
+        // 求截面插入位置
+        CoordinateSystem startCS = new CoordinateSystem();
+        CoordinateSystem startCSTemp = new CoordinateSystem();
+        CoordinateSystem startCSTemp2 = new CoordinateSystem();
+        Point startPoint = new Point();
+        startCSTemp.ByParameterAlongCurve(centerLine, startPos/centerLineLength, baseCS.ZDirection);
+        startCSTemp2.ByOriginPrimarySecondaryDirections(startCSTemp, startCSTemp.YDirection, AxisOption.X, startCSTemp.ZDirection, AxisOption.Y);
+        startPoint.AtPlaneCurveIntersection(startCSTemp2.XYPlane, sweepLine);
+         
+        CoordinateSystem endCS = new CoordinateSystem();
+        CoordinateSystem endCSTemp = new CoordinateSystem();
+        CoordinateSystem endCSTemp2 = new CoordinateSystem();
+        Point endPoint = new Point();
+        endCSTemp.ByParameterAlongCurve(centerLine, endPos/centerLineLength, baseCS.ZDirection);
+        endCSTemp2.ByOriginPrimarySecondaryDirections(endCSTemp, endCSTemp.YDirection, AxisOption.X, endCSTemp.ZDirection, AxisOption.Y);
+        endPoint.AtPlaneCurveIntersection(endCSTemp2.XYPlane, sweepLine);
+        
+        // 求放样曲线
+        BSplineCurve sweepCurve = new BSplineCurve();
+        sweepCurve.ExtractRegionUsingStartEndPoint(sweepLine, startPoint, endPoint, false);
+        
+        startCS.ByCartesianCoordinates(startCSTemp2, 0.0, 0.0, 0.0, startPoint);
+        endCS.ByCartesianCoordinates(endCSTemp2, 0.0, 0.0, 0.0, endPoint);
+        
+        // 插入截面单元
+        Cell startCel = new Cell();
+        Cell endCel = new Cell();
+        startCel.ByCoordinateSystemOrPointWithOptionalScaling(startCS, startCelName);
+        endCel.ByCoordinateSystemOrPointWithOptionalScaling(endCS, endCelName);
+         
+        // 提取多边形
+        Polygon startPolygon = new Polygon();
+        Polygon endPolygon = new Polygon();
+        startPolygon.FromElementsInCell(startCel);
+        endPolygon.FromElementsInCell(endCel);
+         
+        // 生成实体
+        BSplineSurface surf = new BSplineSurface();
+        if(funcFlag == 0)      //funcFlag = 0 使用扫略创建实体
+        {
+            surf.FromRailsAndSweptSections(sweepCurve, startPolygon[startSecIndex], Section1=endPolygon[endSecIndex], KeepSweptSectionsParallelToOrginalSections=false, IfNoRail1RotationAxisFromRail0=false);
+            // FromRailsAndSweptSections(Rail0, Section0 [, Rail1 [, Section1 [, SkinDirection [, KeepSweptSectionsParallelToOrginalSections [, IfNoRail1RotationAxisFromRail0 [, IfNoRail1ForceSectionsToBeOrthogToRail0 [, IfRail1PresentScaleSectionsByInterRailDistance [, UniformlyScaleSectionsByInterRailDistance [, UCurveDisplay [, VCurveDisplay]]]]]]]]]] );
+        }
+        else if(funcFlag == 1)  //funcFlag = 1 使用放样创建实体
+        {
+            surf.LoftCurves({startPolygon[startSecIndex],endPolygon[startSecIndex]});
+        }
+        Solid finalSolid = new Solid();
+        finalSolid.BySurfaceCapping(surf);
+        return finalSolid;
+    }
+    
+    global redeclare Solid createBoxGirder(ExcelRange excelRange, BSplineCurve centerCurve, BSplineCurve sweepCurve)
+    {
+        // 建立混凝土箱梁
+        
+        // 处理excel参数
+        var bridgeData = excelRange.Value;
+        for(int i = 0; i < bridgeData.Count; i++)
+        {
+            if(bridgeData[i][0] == 0)
+            {
+                bridgeData = bridgeData.First(i);
+                break;
+            }
+            for(int j = 4; j <= 6; j++)
+            {
+                var temp = bridgeData[i][j];
+                bridgeData[i][j] = ToInt(temp.Split(','));
+            }
+            // 在首列前插入
+            bridgeData[i].Insert(0, calLine2Dlength(centerCurve, baseCS));
+            bridgeData[i].Insert(0, sweepCurve);
+            bridgeData[i].Insert(0, centerCurve);
+        }
+        // 生成箱梁
+        Solid boxGirder = new Solid();
+        for(int i = 0; i < bridgeData.Count; i++)
+        {
+            Solid boxSolid = new Solid(boxGirder);
+            Solid tempSolid = new Solid();
+            tempSolid.ByFunction(createBoxGirderSolid, bridgeData[i], DebuggerTriggerLevel.BreakpointsAndExceptions);
+            if(tempSolid.Count == 1)
+            {
+                boxSolid.BooleanOperation(tempSolid[0], tempSolid[0], BooleanOperation.Union);
+            }
+            else if(tempSolid.Count > 1)
+            {
+                
+                boxSolid.BooleanOperation(tempSolid[0], tempSolid.Rest(1), BooleanOperation.Difference);
+            }
+        }
+        return boxGirder;
+    };
+    
+    global redeclare Solid createSteelBox(BSplineCurve centerLine, BSplineCurve sweepLine, ExcelRange excelRange)
+    {
+        // 建立钢箱梁
+    
+        // 获取excel信息并删除空行
+        object[] bridgeData = {};
+        for(int i = 0; i < excelRange.Value.Count; i++)
+        {
+            if(excelRange.Value[i][0] == 0)
+            {
+                break;
+            }
+            bridgeData.Add(excelRange.Value[i]);
+        }
+        
+        // 计算路中线长度
+        double centerLineLength = calLine2Dlength(centerLine, baseCS);
+        
+        // 求截面插入位置
+        CoordinateSystem posCS = new CoordinateSystem();
+        CoordinateSystem posCSTemp = new CoordinateSystem();
+        CoordinateSystem posCSTemp2 = new CoordinateSystem();
+        Point posPoint = new Point();
+        double pos = bridgeData.Transpose()[0];
+        posCSTemp.ByParameterAlongCurve(centerLine, pos/centerLineLength, baseCS.ZDirection);
+        posCSTemp2.ByOriginPrimarySecondaryDirections(posCSTemp, posCSTemp.YDirection, AxisOption.X, posCSTemp.ZDirection, AxisOption.Y);
+        posPoint.AtPlaneCurveIntersection(posCSTemp2.XYPlane, sweepLine);
+        posCS.ByCartesianCoordinates(posCSTemp2, 0.0, 0.0, 0.0, posPoint);
+        
+        // 插入截面单元
+        Cell secCel = new Cell();
+        string celName;
+        celName = bridgeData[0][1];
+        secCel.ByCoordinateSystemOrPointWithOptionalScaling(posCS, celName);
+         
+        // 提取复杂多边形
+        Curve secCurve = new Curve();
+        secCurve.FromElementsInCell(secCel);
+        secCurve = secCurve.Transpose();
+        
+        // 提取多边形
+        Polygon secPolygon = new Polygon();
+        secPolygon.FromElementsInCell(secCel);
+        secPolygon = secPolygon.Transpose();
+        
+        Solid finalSolid = new Solid();
+        // breakpoint;
+        
+        // 生成实体
+        for(int i = 0; i < secCurve.Count; i++)
+        {
+            BSplineSurface surf = new BSplineSurface();
+            surf.LoftCurves(secCurve[i]);
+            Solid tempSolid = new Solid(finalSolid);
+            tempSolid.BySurfaceCapping(surf);
+        }
+        for(int i = 0; i < secPolygon.Count; i++)
+        {
+            BSplineSurface surf = new BSplineSurface();
+            surf.LoftCurves(secPolygon[i]);
+            Solid tempSolid = new Solid(finalSolid);
+            tempSolid.BySurfaceCapping(surf);
+        }
+        
+        // 建立隔板
+        for(int i = 0; i < bridgeData.Count; i++)
+        {
+            Cell geBanCell = new Cell();
+            string geBanCellName = bridgeData[i][2];
+            geBanCell.ByCoordinateSystemOrPointWithOptionalScaling(posCS[i], geBanCellName);
+            Solid geBanSolid = new Solid(finalSolid);
+            geBanSolid.FromElementsInCell(geBanCell);
+        }
+        return finalSolid;
+    };
+}
