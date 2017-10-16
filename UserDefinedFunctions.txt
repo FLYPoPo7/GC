@@ -1,4 +1,4 @@
-transaction script 'User-Defined Functions ver.201710152048'
+transaction 1 script 'User-Defined Functions ver.201710161134'
 {
     global redeclare double calLine2Dlength(BSplineCurve line3D, CoordinateSystem baseCS)
     {
@@ -29,7 +29,7 @@ transaction script 'User-Defined Functions ver.201710152048'
         return new BSplineCurve();
     };
     
-    global redeclare BSplineCurve offsetCurveByCoordinates(BSplineCurve centerCurve, double offsetX, double offsetY)
+    global redeclare BSplineCurve offsetCurveByCoordinates(BSplineCurve centerCurve, double offsetX, double offsetY, double startParam=0.0, double endParam=1.0)
     {
         // 根据截面位置偏移曲线
         
@@ -68,6 +68,21 @@ transaction script 'User-Defined Functions ver.201710152048'
         
         BSplineCurve targetCurve = new BSplineCurve();
         targetCurve.ByPolesAsDPoint3ds(baseCS, point3D, 4);
+        
+        // 截取曲线
+        CoordinateSystem startCS = new CoordinateSystem();
+        CoordinateSystem endCS = new CoordinateSystem();
+        
+        startCS.ByParameterAlongCurve(centerCurve, startParam, baseCS.ZDirection);
+        endCS.ByParameterAlongCurve(centerCurve, endParam, baseCS.ZDirection);
+        
+        startCS = new CoordinateSystem().ByOriginPrimarySecondaryDirections(startCS, startCS.YDirection.OppositeDirection, AxisOption.X, startCS.ZDirection, AxisOption.Y);
+        endCS = new CoordinateSystem().ByOriginPrimarySecondaryDirections(endCS, endCS.YDirection.OppositeDirection, AxisOption.X, endCS.ZDirection, AxisOption.Y);
+        
+        startCS = new CoordinateSystem().ByCartesianCoordinates(startCS, offsetX, offsetY, 0.0);
+        endCS = new CoordinateSystem().ByCartesianCoordinates(endCS, offsetX, offsetY, 0.0);
+        
+        targetCurve = targetCurve.ExtractRegionUsingStartEndPoint(targetCurve, startCS, endCS);
         return targetCurve;
     };
     
