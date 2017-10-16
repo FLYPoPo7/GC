@@ -1,4 +1,4 @@
-transaction script 'User-Defined Functions'
+transaction script 'User-Defined Functions ver.201710152048'
 {
     global redeclare double calLine2Dlength(BSplineCurve line3D, CoordinateSystem baseCS)
     {
@@ -11,65 +11,286 @@ transaction script 'User-Defined Functions'
         return line2D.Length;
     };
     
-    global redeclare Solid createBoxGirderSolid(BSplineCurve centerLine, BSplineCurve sweepLine, double centerLineLength,
+    global redeclare BSplineCurve findOffsetCurve(BSplineCurve[] offsetCurves, BSplineCurve centerCurve, double offsetX, double offsetY)
+    {
+        CoordinateSystem startCS = new CoordinateSystem();
+        startCS.ByParameterAlongCurve(centerCurve, 0, baseCS.ZDirection);
+        startCS = new CoordinateSystem().ByOriginPrimarySecondaryDirections(startCS, startCS.YDirection.OppositeDirection, AxisOption.X, startCS.ZDirection, AxisOption.Y);
+        
+        Point startPointOnCenterCurve = new Point();
+        startPointOnCenterCurve.ByCartesianCoordinates(startCS, offsetX, offsetY, 0);
+        for(int i = 0; i < offsetCurves.Count; i++)
+        {
+            if( Distance(startPointOnCenterCurve, offsetCurves[i].StartPoint) < 1e-6)
+            {
+                return offsetCurves[i];
+            }
+        }
+        return new BSplineCurve();
+    };
+    
+    global redeclare BSplineCurve offsetCurveByCoordinates(BSplineCurve centerCurve, double offsetX, double offsetY)
+    {
+        // 根据截面位置偏移曲线
+        
+        // 建立2D投影曲线
+        DPoint3d points2D = {};
+        for(int i = 0; i < centerCurve.Poles.Count; i++)
+        {
+            points2D[i] = new DPoint3d(centerCurve.Poles[i].X, centerCurve.Poles[i].Y, 0);
+        }
+        
+        PolyLine centerPLine2D = new PolyLine();
+        centerPLine2D.ByVerticesAsDPoint3ds(baseCS, points2D);
+        
+        // 偏移2D投影曲线
+        PolyLine targetLine2D = new PolyLine();
+        if(Abs(offsetX-0)<1e-6)
+        {
+            targetLine2D = centerPLine2D;
+            if(Abs(offsetY-0)<1e-6)
+            {
+                return centerCurve;
+            }
+        }
+        else
+        {
+            targetLine2D.Offset(centerPLine2D, OffsetMethod.ByDistance, centerPLine2D.StartPoint, OffsetDistance = -offsetX);
+        }
+        
+        DPoint3d point3D = {};
+        
+        // 竖向偏移曲线
+        for(int i = 0; i < points2D.Count; i++)
+        {
+            point3D[i] = new DPoint3d(targetLine2D.Vertices[i].X, targetLine2D.Vertices[i].Y, centerCurve.Poles[i].Z + offsetY);
+        }
+        
+        BSplineCurve targetCurve = new BSplineCurve();
+        targetCurve.ByPolesAsDPoint3ds(baseCS, point3D, 4);
+        return targetCurve;
+    };
+    
+    // 斜角箱梁用扫略线
+    global redeclare BSplineCurve offsetCurves;
+        
+    global redeclare Solid createBoxGirderSolid(BSplineCurve centerCurveOfRoad,  double centerCurveLength, 
                                                 replicatable double startPos, replicatable double endPos, replicatable string startCelName, replicatable string endCelName,
-                                                replicatable int startSecIndex, replicatable int endSecIndex, replicatable int funcFlag)
+                                                replicatable int startSecIndex, replicatable int endSecIndex, replicatable int funcFlag, double angle,
+                                                optional BSplineCurve centerCurveOfGirder=null)
     {
         // 建立混凝土箱梁节段
         
         // 求截面插入位置
         CoordinateSystem startCS = new CoordinateSystem();
-        CoordinateSystem startCSTemp = new CoordinateSystem();
-        CoordinateSystem startCSTemp2 = new CoordinateSystem();
-        Point startPoint = new Point();
-        startCSTemp.ByParameterAlongCurve(centerLine, startPos/centerLineLength, baseCS.ZDirection);
-        startCSTemp2.ByOriginPrimarySecondaryDirections(startCSTemp, startCSTemp.YDirection, AxisOption.X, startCSTemp.ZDirection, AxisOption.Y);
-        startPoint.AtPlaneCurveIntersection(startCSTemp2.XYPlane, sweepLine);
-         
         CoordinateSystem endCS = new CoordinateSystem();
-        CoordinateSystem endCSTemp = new CoordinateSystem();
-        CoordinateSystem endCSTemp2 = new CoordinateSystem();
-        Point endPoint = new Point();
-        endCSTemp.ByParameterAlongCurve(centerLine, endPos/centerLineLength, baseCS.ZDirection);
-        endCSTemp2.ByOriginPrimarySecondaryDirections(endCSTemp, endCSTemp.YDirection, AxisOption.X, endCSTemp.ZDirection, AxisOption.Y);
-        endPoint.AtPlaneCurveIntersection(endCSTemp2.XYPlane, sweepLine);
         
-        // 求放样曲线
+        // 扫略曲线
         BSplineCurve sweepCurve = new BSplineCurve();
-        sweepCurve.ExtractRegionUsingStartEndPoint(sweepLine, startPoint, endPoint, false);
         
-        startCS.ByCartesianCoordinates(startCSTemp2, 0.0, 0.0, 0.0, startPoint);
-        endCS.ByCartesianCoordinates(endCSTemp2, 0.0, 0.0, 0.0, endPoint);
-        
-        // 插入截面单元
-        Cell startCel = new Cell();
-        Cell endCel = new Cell();
-        startCel.ByCoordinateSystemOrPointWithOptionalScaling(startCS, startCelName);
-        endCel.ByCoordinateSystemOrPointWithOptionalScaling(endCS, endCelName);
-         
-        // 提取多边形
+        // 扫略多边形
         Polygon startPolygon = new Polygon();
         Polygon endPolygon = new Polygon();
-        startPolygon.FromElementsInCell(startCel);
-        endPolygon.FromElementsInCell(endCel);
-         
+    
+        // 辅助坐标系
+        CoordinateSystem startCSTemp = new CoordinateSystem();
+        CoordinateSystem endCSTemp = new CoordinateSystem();
+        
+        // 在曲线上找到坐标系
+        startCSTemp.ByParameterAlongCurve(centerCurveOfRoad, startPos/centerCurveLength, baseCS.ZDirection);
+        endCSTemp.ByParameterAlongCurve(centerCurveOfRoad, endPos/centerCurveLength, baseCS.ZDirection);
+        
+        // 调整坐标系坐标轴
+        startCSTemp = new CoordinateSystem().ByOriginPrimarySecondaryDirections(startCSTemp, startCSTemp.YDirection.OppositeDirection, AxisOption.X, startCSTemp.ZDirection, AxisOption.Y);
+        endCSTemp = new CoordinateSystem().ByOriginPrimarySecondaryDirections(endCSTemp, endCSTemp.YDirection.OppositeDirection, AxisOption.X, endCSTemp.ZDirection, AxisOption.Y);
+        
+        // 正交箱梁
+        if(angle == 0)
+        {
+            // 扫略线为路中线
+            if(centerCurveOfGirder == null)
+            {
+                // 求插入坐标系
+                startCS = startCSTemp;
+                endCS = endCSTemp;
+                
+               // 求放样曲线
+                sweepCurve.ExtractRegionUsingStartEndPoint(centerCurveOfRoad, startCS, endCS, false);
+            }
+            
+            // 扫略线为路中线的偏移线
+            else
+            {
+                Point startPoint = new Point();
+                Point endPoint = new Point();
+                
+                // 截取centerCurveOfGirder以简化求交计算
+                // 在centerCurveOfGirder的sweepCurve前后各加50m左右
+                double startPosPara = (startPos - 50)/centerCurveLength;
+                double endPosPara = (endPos + 50)/centerCurveLength;
+                if(startPosPara < 0)
+                {
+                    startPosPara = 0;
+                }
+                if(endPosPara > 1)
+                {
+                    endPosPara = 1;
+                }
+                centerCurveOfGirder = new BSplineCurve().ExtractRegionUsingParameterSpan(centerCurveOfGirder, {startPosPara, endPosPara});
+                
+                // 求中心桩号XY平面与桥梁中心线的交点
+                startPoint.AtPlaneCurveIntersection(startCSTemp.XYPlane, centerCurveOfGirder);
+                endPoint.AtPlaneCurveIntersection(endCSTemp.XYPlane, centerCurveOfGirder);
+    
+                // 求插入坐标系
+                startCS.ByCartesianCoordinates(startCSTemp, 0.0, 0.0, 0.0, startPoint);
+                endCS.ByCartesianCoordinates(endCSTemp, 0.0, 0.0, 0.0, endPoint);
+                                
+                // 求放样曲线
+                sweepCurve.ExtractRegionUsingStartEndPoint(centerCurveOfGirder, startPoint, endPoint, false);
+            }
+            
+            // 插入截面单元
+            Cell startCel = new Cell();
+            Cell endCel = new Cell();
+            startCel.ByCoordinateSystemOrPointWithOptionalScaling(startCS, startCelName, XScale=1/Cos(angle));
+            endCel.ByCoordinateSystemOrPointWithOptionalScaling(endCS, endCelName, XScale=1/Cos(angle));
+             
+            // 提取多边形
+            startPolygon.FromElementsInCell(startCel);
+            endPolygon.FromElementsInCell(endCel);
+        }
+        
+        // 斜交箱梁
+        else
+        {
+            // 沿Y轴旋转坐标系
+            startCSTemp = new CoordinateSystem().ByOriginRotationAboutCoordinateSystem(startCSTemp, startCSTemp, angle, AxisOption.Y);
+            endCSTemp = new CoordinateSystem().ByOriginRotationAboutCoordinateSystem(endCSTemp, endCSTemp, angle, AxisOption.Y);
+            
+            // 扫略线为路中线
+            if(centerCurveOfGirder == null)
+            {
+                // 求插入坐标系
+                startCS = startCSTemp;
+                endCS = endCSTemp;
+                
+                // 求放样曲线
+                sweepCurve.ExtractRegionUsingStartEndPoint(centerCurveOfRoad, startCS, endCS, false);
+                
+                // 将路中线赋予箱梁中线
+                centerCurveOfGirder = centerCurveOfRoad;
+            }
+            
+            // 扫略线为路中线的偏移线
+            else
+            {
+                Point startPoint = new Point();
+                Point endPoint = new Point();
+                
+                // 求中心桩号XY平面与桥梁中心线的交点
+                startPoint.AtPlaneCurveIntersection(startCSTemp.XYPlane, centerCurveOfGirder);
+                endPoint.AtPlaneCurveIntersection(endCSTemp.XYPlane, centerCurveOfGirder);
+                
+                // 求插入坐标系
+                startCS.ByCartesianCoordinates(startCSTemp, 0.0, 0.0, 0.0, startPoint);
+                endCS.ByCartesianCoordinates(endCSTemp, 0.0, 0.0, 0.0, endPoint);
+                
+                // 求放样曲线
+                sweepCurve.ExtractRegionUsingStartEndPoint(centerCurveOfGirder, startPoint, endPoint, false);
+            }
+            
+            // 在原点位置插入单元
+            Cell startCelTemp = new Cell();
+            Cell endCelTemp = new Cell();
+            startCelTemp.ByCoordinateSystemOrPointWithOptionalScaling(baseCS, startCelName);
+            endCelTemp.ByCoordinateSystemOrPointWithOptionalScaling(baseCS, endCelName);
+            
+            // 提取多边形
+            Polygon startPolygonTemp = new Polygon();
+            Polygon endPolygonTemp = new Polygon();
+            startPolygonTemp.FromElementsInCell(startCelTemp);
+            endPolygonTemp.FromElementsInCell(endCelTemp);
+            
+            for(int i = 0; i < startPolygonTemp.Count; i++)
+            {
+                // 求目标多边形
+                Point[] vertices = {};
+                for(int j = 0; j < startPolygonTemp[i].Vertices.Count; j++)
+                {
+                    double offsetX = startPolygonTemp[i].Vertices[j].X;
+                    double offsetY = startPolygonTemp[i].Vertices[j].Y;
+                    
+                    // 获取偏移曲线
+                    BSplineCurve offsetCurve = findOffsetCurve(offsetCurves, centerCurveOfGirder, offsetX, offsetY);
+                    if(offsetCurve.Poles.Count == 0)
+                    {
+                        offsetCurve = offsetCurveByCoordinates(centerCurveOfGirder, offsetX, offsetY);
+                        offsetCurves.Add(offsetCurve);
+                    }
+                    
+                    // 求得斜交面与偏移曲线的交点
+                    // 因AtPlaneCurveIntersection()存在bug而增加的判断逻辑
+                    if(Abs(offsetX-0)<1e-6 && Abs(offsetY-0)<1e-6)
+                    {
+                        vertices[j] = startCS.Origin;
+                    }
+                    else
+                    {
+                        vertices[j] = new Point().AtPlaneCurveIntersection(startCS.XYPlane, offsetCurve);
+                    }
+                }
+                Polygon subStartPolygon = new Polygon(startPolygon);
+                subStartPolygon.ByVertices(vertices);
+            }
+            for(int i = 0; i < endPolygonTemp.Count; i++)
+            {
+                // 求目标多边形
+                Point[] vertices = {};
+                for(int j = 0; j < endPolygonTemp[i].Vertices.Count; j++)
+                {
+                    double offsetX = endPolygonTemp[i].Vertices[j].X;
+                    double offsetY = endPolygonTemp[i].Vertices[j].Y;
+                    
+                    // 获取偏移曲线
+                    BSplineCurve offsetCurve = findOffsetCurve(offsetCurves, centerCurveOfGirder, offsetX, offsetY);
+                    if(offsetCurve.Poles.Count == 0)
+                    {
+                        offsetCurve = offsetCurveByCoordinates(centerCurveOfGirder, offsetX, offsetY);
+                        offsetCurves.Add(offsetCurve);
+                    }
+                    
+                    // 求得斜交面与偏移曲线的交点
+                    // 因AtPlaneCurveIntersection()存在bug而增加的判断逻辑
+                    if(Abs(offsetX-0)<1e-6 && Abs(offsetY-0)<1e-6)
+                    {
+                        vertices[j] = endCS.Origin;
+                    }
+                    else
+                    {
+                        vertices[j] = new Point().AtPlaneCurveIntersection(endCS.XYPlane, offsetCurve);
+                    }
+                }
+                Polygon subEndPolygon = new Polygon(endPolygon);
+                subEndPolygon.ByVertices(vertices);
+            }
+        }
         // 生成实体
         BSplineSurface surf = new BSplineSurface();
         if(funcFlag == 0)      //funcFlag = 0 使用扫略创建实体
         {
             surf.FromRailsAndSweptSections(sweepCurve, startPolygon[startSecIndex], Section1=endPolygon[endSecIndex], KeepSweptSectionsParallelToOrginalSections=false, IfNoRail1RotationAxisFromRail0=false);
-            // FromRailsAndSweptSections(Rail0, Section0 [, Rail1 [, Section1 [, SkinDirection [, KeepSweptSectionsParallelToOrginalSections [, IfNoRail1RotationAxisFromRail0 [, IfNoRail1ForceSectionsToBeOrthogToRail0 [, IfRail1PresentScaleSectionsByInterRailDistance [, UniformlyScaleSectionsByInterRailDistance [, UCurveDisplay [, VCurveDisplay]]]]]]]]]] );
         }
         else if(funcFlag == 1)  //funcFlag = 1 使用放样创建实体
         {
-            surf.LoftCurves({startPolygon[startSecIndex],endPolygon[startSecIndex]});
+            surf.LoftCurves({startPolygon[startSecIndex], endPolygon[startSecIndex]});
         }
         Solid finalSolid = new Solid();
         finalSolid.BySurfaceCapping(surf);
         return finalSolid;
-    }
+    };
     
-    global redeclare Solid createBoxGirder(ExcelRange excelRange, BSplineCurve centerCurve, BSplineCurve sweepCurve)
+    global redeclare Solid createBoxGirder(ExcelRange excelRange, BSplineCurve centerCurve, double startStation, double angle=0.0, optional BSplineCurve sweepCurve=null)
     {
         // 建立混凝土箱梁
         
@@ -87,13 +308,25 @@ transaction script 'User-Defined Functions'
                 var temp = bridgeData[i][j];
                 bridgeData[i][j] = ToInt(temp.Split(','));
             }
+            bridgeData[i][0] = bridgeData[i][0] - startStation;
+            bridgeData[i][1] = bridgeData[i][1] - startStation;
+            
             // 在首列前插入
             bridgeData[i].Insert(0, calLine2Dlength(centerCurve, baseCS));
-            bridgeData[i].Insert(0, sweepCurve);
             bridgeData[i].Insert(0, centerCurve);
+            bridgeData[i].Add(angle);
+            if(sweepCurve != null)
+            {
+                bridgeData[i].Add(sweepCurve);
+            }
         }
+        
+        // 清空偏移曲线数组
+        offsetCurves = {};
+        
         // 生成箱梁
         Solid boxGirder = new Solid();
+        
         for(int i = 0; i < bridgeData.Count; i++)
         {
             Solid boxSolid = new Solid(boxGirder);
@@ -112,7 +345,9 @@ transaction script 'User-Defined Functions'
         return boxGirder;
     };
     
-    global redeclare Solid createSteelBox(BSplineCurve centerLine, BSplineCurve sweepLine, ExcelRange excelRange)
+    //----------------------------------------------------------------------------------------------------------
+    
+    global redeclare Solid createSteelBox(BSplineCurve centerCurveOfRoad, ExcelRange excelRange, double startStation, optional double offsetX=0.0, optional double offsetY=0.0)
     {
         // 建立钢箱梁
     
@@ -125,22 +360,23 @@ transaction script 'User-Defined Functions'
                 break;
             }
             bridgeData.Add(excelRange.Value[i]);
+            bridgeData[i][0] = bridgeData[i][0] - startStation;
         }
-        
+    
         // 计算路中线长度
-        double centerLineLength = calLine2Dlength(centerLine, baseCS);
+        double centerCurveLength = calLine2Dlength(centerCurveOfRoad, baseCS);
         
         // 求截面插入位置
         CoordinateSystem posCS = new CoordinateSystem();
         CoordinateSystem posCSTemp = new CoordinateSystem();
-        CoordinateSystem posCSTemp2 = new CoordinateSystem();
         Point posPoint = new Point();
         double pos = bridgeData.Transpose()[0];
-        posCSTemp.ByParameterAlongCurve(centerLine, pos/centerLineLength, baseCS.ZDirection);
-        posCSTemp2.ByOriginPrimarySecondaryDirections(posCSTemp, posCSTemp.YDirection, AxisOption.X, posCSTemp.ZDirection, AxisOption.Y);
-        posPoint.AtPlaneCurveIntersection(posCSTemp2.XYPlane, sweepLine);
-        posCS.ByCartesianCoordinates(posCSTemp2, 0.0, 0.0, 0.0, posPoint);
-        
+    
+        posCSTemp.ByParameterAlongCurve(centerCurveOfRoad, pos/centerCurveLength, baseCS.ZDirection);
+        posCSTemp = new CoordinateSystem().ByOriginPrimarySecondaryDirections(posCSTemp, posCSTemp.YDirection, AxisOption.X, posCSTemp.ZDirection, AxisOption.Y);
+        posCSTemp = new CoordinateSystem().ByCartesianCoordinates(posCSTemp, -offsetX, offsetY, 0);
+        posCS = posCSTemp;
+    
         // 插入截面单元
         Cell secCel = new Cell();
         string celName;
@@ -158,7 +394,6 @@ transaction script 'User-Defined Functions'
         secPolygon = secPolygon.Transpose();
         
         Solid finalSolid = new Solid();
-        // breakpoint;
         
         // 生成实体
         for(int i = 0; i < secCurve.Count; i++)
